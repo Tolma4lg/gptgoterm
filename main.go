@@ -4,14 +4,17 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 
+	"io"
+
 	"github.com/go-resty/resty/v2"
+	"gopkg.in/yaml.v2"
 )
 
 const (
 	apiEndpoint = "https://api.openai.com/v1/chat/completions"
+	modelName   = "gpt-3.5-turbo"
 )
 
 func main() {
@@ -19,7 +22,11 @@ func main() {
 		// read input from terminal
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Print("Enter prompt: ")
-		text, _ := reader.ReadString('\n')
+		text, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("Error reading input:", err)
+			continue
+		}
 		// send text to GPT API
 		gptResponse, err := sendToGPT(text)
 		if err != nil {
@@ -32,52 +39,68 @@ func main() {
 }
 
 func sendToGPT(inputText string) (string, error) {
-	file, err := os.Open("config.json")
+
+	config, err := readConfig("config.yaml")
 	if err != nil {
-		log.Fatalf("Error while opening config file: %v", err)
+		return "", fmt.Errorf("error while reading config file: %v", err)
 	}
-	defer file.Close()
-
-	// Decode JSON from the file into the Config struct
-	var config Config
-	decoder := json.NewDecoder(file)
-	err = decoder.Decode(&config)
-	if err != nil {
-		log.Fatalf("Error while decoding config file: %v", err)
-
-	}
-
-	// Access the API key
 	apiKey := config.APIKey
 	client := resty.New()
+
+	requestBody := struct {
+		Model     string        `json:"model"`
+		Messages  []interface{} `json:"messages"`
+		MaxTokens int           `json:"max_tokens"`
+	}{modelName, []interface{}{map[string]interface{}{"role": "system", "content": inputText}}, 50}
+
+	requestBodyJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("error while encoding request body: %v", err)
+	}
 
 	response, err := client.R().
 		SetAuthToken(apiKey).
 		SetHeader("Content-Type", "application/json").
-		SetBody(map[string]interface{}{
-			"model":      "gpt-3.5-turbo",
-			"messages":   []interface{}{map[string]interface{}{"role": "system", "content": inputText}},
-			"max_tokens": 50,
-		}).
+		SetBody(requestBodyJSON).
 		Post(apiEndpoint)
 
 	if err != nil {
-		log.Fatalf("Error while sending send the request: %v", err)
+		return "", fmt.Errorf("error while sending the request: %v", err)
 	}
-	if response.StatusCode() != 200 {
-		return "", fmt.Errorf("%s", response.Body())
+	if response.IsError() {
+		return "", fmt.Errorf("%s", response.String())
 	}
-	body := response.Body()
+	body := response.String()
 
 	var chatCompletion ChatCompletion
 	err = json.Unmarshal([]byte(body), &chatCompletion)
 	if err != nil {
-		fmt.Println("Error parsing JSON:", err)
-		return "", fmt.Errorf("%s", err)
+		return "", fmt.Errorf("error parsing JSON: %v", err)
 	}
 	contentValue := chatCompletion.Choices[0].Message.Content
 
 	return contentValue, nil
+}
+
+func readConfig(filename string) (*Config, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.Reader(file))
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }
 
 type ChatCompletion struct {
@@ -101,5 +124,5 @@ type ChatCompletion struct {
 }
 
 type Config struct {
-	APIKey string `json:"apiKey"`
+	APIKey string `yaml:"apiKey"`
 }
